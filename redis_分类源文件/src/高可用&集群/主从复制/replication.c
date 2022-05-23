@@ -1123,6 +1123,9 @@ void replicationCreateMasterClient(int fd, int dbid) {
  * master-replica synchronization: if it fails after multiple attempts
  * the replica cannot be considered reliable and exists with an
  * error. */
+ // 在主从复制过程中被调用。
+ // 当主从节点在进行复制时，如果从节点的aof选项被打开，在加载rdb文件时，aof选项会被关闭。
+ // 无论rdb加载是否完成，restartAOFAfterSYNC函数都会被调用，用来恢复被关闭的aof。
 void restartAOFAfterSYNC() {
     unsigned int tries, max_tries = 10;
     for (tries = 0; tries < max_tries; ++tries) {
@@ -1473,18 +1476,21 @@ char *sendSynchronousCommand(int flags, int fd, ...) {
 #define PSYNC_FULLRESYNC 3
 #define PSYNC_NOT_SUPPORTED 4
 #define PSYNC_TRY_LATER 5
+// 负责向主库发送数据同步的命令
 int slaveTryPartialResynchronization(int fd, int read_reply) {
     char *psync_replid;
     char psync_offset[32];
     sds reply;
 
     /* Writing half */
+    // 发送PSYNC命令
     if (!read_reply) {
         /* Initially set master_initial_offset to -1 to mark the current
          * master run_id and offset as not valid. Later if we'll be able to do
          * a FULL resync using the PSYNC command we'll set the offset at the
          * right value, so that this information will be propagated to the
          * client structure representing the master into server.master. */
+         // 从库第一次和主库同步时，设置offset为-1
         server.master_initial_offset = -1;
 
         if (server.cached_master) {
@@ -1498,6 +1504,7 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
         }
 
         /* Issue the PSYNC command */
+        // 调用sendSynchronousCommand函数发送PSYNC命令
         reply = sendSynchronousCommand(SYNC_CMD_WRITE,fd,"PSYNC",psync_replid,psync_offset,NULL);
         if (reply != NULL) {
             serverLog(LL_WARNING,"Unable to send PSYNC to master: %s",reply);
@@ -1509,6 +1516,7 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
     }
 
     /* Reading half */
+    // 读取主机响应
     reply = sendSynchronousCommand(SYNC_CMD_READ,fd,NULL);
     if (sdslen(reply) == 0) {
         /* The master may send empty newlines after it receives PSYNC
@@ -1518,7 +1526,7 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
     }
 
     aeDeleteFileEvent(server.el,fd,AE_READABLE);
-
+    // 主库返回FULLRESYNC 全量复制
     if (!strncmp(reply,"+FULLRESYNC",11)) {
         char *replid = NULL, *offset = NULL;
 
@@ -1551,7 +1559,7 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
         sdsfree(reply);
         return PSYNC_FULLRESYNC;
     }
-
+    // 主机返回CONTINUE 执行增量复制
     if (!strncmp(reply,"+CONTINUE",9)) {
         /* Partial resync was accepted. */
         serverLog(LL_NOTICE,
@@ -1616,7 +1624,7 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
         sdsfree(reply);
         return PSYNC_TRY_LATER;
     }
-
+    // 主机返回错误
     if (strncmp(reply,"-ERR",4)) {
         /* If it's not an error, log the unexpected event. */
         serverLog(LL_WARNING,
@@ -1795,6 +1803,7 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
 
     /* Receive CAPA reply. */
+    // 从库状态机进入REPL_STATE_RECEIVE_CAPA
     if (server.repl_state == REPL_STATE_RECEIVE_CAPA) {
         err = sendSynchronousCommand(SYNC_CMD_READ,fd,NULL);
         /* Ignore the error if any, not all the Redis versions support
@@ -1804,6 +1813,7 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
                                   "REPLCONF capa: %s", err);
         }
         sdsfree(err);
+        // 改变server状态
         server.repl_state = REPL_STATE_SEND_PSYNC;
     }
 
@@ -1812,6 +1822,7 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
      * to start a full resynchronization so that we get the master run id
      * and the global offset, to try a partial resync at the next
      * reconnection attempt. */
+     // 如果从库状态机变成REPL_STATE_SEND_PSYNC，调用slaveTryPartialResynchronization函数向主库发送数据同步命令
     if (server.repl_state == REPL_STATE_SEND_PSYNC) {
         if (slaveTryPartialResynchronization(fd,0) == PSYNC_WRITE_ERROR) {
             err = sdsnew("Write error sending the PSYNC command.");
@@ -1910,7 +1921,8 @@ write_error: /* Handle sendSynchronousCommand(SYNC_CMD_WRITE) errors. */
     sdsfree(err);
     goto error;
 }
-
+// 从库调用connectWithMaster函数，会通过anetTcpNonBlockBestEffortBindConnect函数和主库建立连接，一旦建立后，从库实例会在连街上建立读写事件
+// 并且对读写事件的注册的函数为syncWithMaster函数
 int connectWithMaster(void) {
     int fd;
 
@@ -1921,7 +1933,7 @@ int connectWithMaster(void) {
             strerror(errno));
         return C_ERR;
     }
-
+    // 注册读写事件 回调函数syncWithMaster函数
     if (aeCreateFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE,syncWithMaster,NULL) ==
             AE_ERR)
     {
@@ -1932,6 +1944,7 @@ int connectWithMaster(void) {
 
     server.repl_transfer_lastio = server.unixtime;
     server.repl_transfer_s = fd;
+    // 建立连接后，将状态机设置为REPL_STATE_CONNECTING状态
     server.repl_state = REPL_STATE_CONNECTING;
     return C_OK;
 }
@@ -2086,6 +2099,7 @@ void replicaofCommand(client *c) {
             return;
 
         /* Check if we are already attached to the specified slave */
+        // 检查是否已记录主库信息 如果记录 直接返回连接建立的消息
         if (server.masterhost && !strcasecmp(server.masterhost,c->argv[1]->ptr)
             && server.masterport == port) {
             serverLog(LL_NOTICE,"REPLICAOF would result into synchronization with the master we are already connected with. No operation performed.");
@@ -2094,6 +2108,7 @@ void replicaofCommand(client *c) {
         }
         /* There was no previous master or the user specified a different one,
          * we can continue. */
+         // 如果没有记录主库ip和端口号，设置主库信息
         replicationSetMaster(c->argv[1]->ptr, port);
         sds client = catClientInfoString(sdsempty(),c);
         serverLog(LL_NOTICE,"REPLICAOF %s:%d enabled (user request from '%s')",
@@ -2598,6 +2613,7 @@ void replicationCron(void) {
     }
 
     /* Check if we should connect to a MASTER */
+    // 如果从库实例是REPL_STATE_CONNECT，从库直接通过connectWithMaster函数和主库建立连接
     if (server.repl_state == REPL_STATE_CONNECT) {
         serverLog(LL_NOTICE,"Connecting to MASTER %s:%d",
             server.masterhost, server.masterport);

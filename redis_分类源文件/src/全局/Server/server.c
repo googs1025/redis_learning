@@ -1296,17 +1296,20 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
 
         /* Trigger an AOF rewrite if needed. */
+        // aof开关为on 如果没有rdb子进程 也没有aof子进程 ，调用rewriteAppendOnlyFileBackground()
         if (server.aof_state == AOF_ON &&
             server.rdb_child_pid == -1 &&
             server.aof_child_pid == -1 &&
             server.aof_rewrite_perc &&
             server.aof_current_size > server.aof_rewrite_min_size)
-        {
+        {   // 计算aof文档当前大小超出基础大小比例
             long long base = server.aof_rewrite_base_size ?
                 server.aof_rewrite_base_size : 1;
+            // 如果aof文件当前大小超过预设阈值 执行aof重写
             long long growth = (server.aof_current_size*100/base) - 100;
             if (growth >= server.aof_rewrite_perc) {
                 serverLog(LL_NOTICE,"Starting automatic rewriting of AOF on %lld%% growth",growth);
+                // 调用rewriteAppendOnlyFileBackground函数
                 rewriteAppendOnlyFileBackground();
             }
         }
@@ -1334,6 +1337,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Replication cron function -- used to reconnect to master,
      * detect transfer failures, start background RDB transfers and so forth. */
+     // 每1000ms执行一次
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
@@ -1356,6 +1360,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * Note: this code must be after the replicationCron() call above so
      * make sure when refactoring this file to keep this order. This is useful
      * because we want to give priority to RDB savings for replication. */
+
     if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
         server.rdb_bgsave_scheduled &&
         (server.unixtime-server.lastbgsave_try > CONFIG_BGSAVE_RETRY_DELAY ||

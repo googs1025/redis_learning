@@ -901,6 +901,7 @@ void loadServerConfig(char *filename, char *options) {
 
 #define config_set_else } else
 
+// 在redis server中 启用config命令
 void configSetCommand(client *c) {
     robj *o;
     long long ll;
@@ -955,6 +956,7 @@ void configSetCommand(client *c) {
                 }
             }
         }
+    // 使用config命令 可以启用aof重写机制， config set appendonly yes
     } config_set_special_field("appendonly") {
         int enable = yesnotoi(o->ptr);
 
